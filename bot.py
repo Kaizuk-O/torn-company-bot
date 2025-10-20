@@ -16,9 +16,11 @@ USER_ID = int(os.getenv("DISCORD_USER_ID"))
 TIMEZONE = os.getenv("TIMEZONE", "Europe/London")
 
 intents = discord.Intents.default()
-intents.messages = True
+intents.message_content = True
 intents.guilds = True
+intents.members = True   # 👈 REQUIRED for on_member_join
 bot = commands.Bot(command_prefix="!", intents=intents)
+
 
 DATA_FILE = "rotation.json"
 tz = pytz.timezone(TIMEZONE)
