@@ -178,6 +178,8 @@ async def status(interaction: discord.Interaction):
         await interaction.response.send_message("🚫 You don’t have permission to use this command.", ephemeral=True)
         return
 
+    await interaction.response.defer()  # <--- acknowledge immediately
+
     try:
         data = load_data()
         employees = data.get("employees", [])
@@ -185,11 +187,9 @@ async def status(interaction: discord.Interaction):
         trained_count = sum(1 for v in trained.values() if v == "Y")
         total = len(employees)
 
-        # Torn company data
         company = get_company_data()
         trains = company["company_detailed"].get("trains_available", 0) if company else "N/A"
 
-        # Time handling
         now = datetime.now(tz)
         next_sync_time = now.replace(hour=21, minute=0, second=0, microsecond=0)
         if next_sync_time < now:
@@ -198,7 +198,6 @@ async def status(interaction: discord.Interaction):
         hours, remainder = divmod(int(time_until_next.total_seconds()), 3600)
         minutes = remainder // 60
 
-        # Format last sync time (you can track this in rotation.json later if you want persistence)
         last_sync = now.strftime("%Y-%m-%d %H:%M")
 
         msg = (
@@ -209,10 +208,10 @@ async def status(interaction: discord.Interaction):
             f"🎯 **Rotation Progress:** {trained_count} / {total} trained"
         )
 
-        await interaction.response.send_message(msg)
+        await interaction.followup.send(msg)  # <--- send after work is done
     except Exception as e:
         print(f"Error in /status: {e}")
-        await interaction.response.send_message("⚠️ Failed to retrieve status.", ephemeral=True)
+        await interaction.followup.send("⚠️ Failed to retrieve status.", ephemeral=True)
 
 
 @bot.tree.command(name="train", description="(Owner only) Mark an employee as trained")
@@ -308,4 +307,5 @@ async def on_ready():
 if __name__ == "__main__":
     import asyncio
     asyncio.run(bot.start(TOKEN))
+
 
