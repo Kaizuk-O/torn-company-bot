@@ -1,0 +1,30 @@
+{
+    "employees": [
+        "Kazama-Yokaze",
+        "Tom",
+        "Joshy_1",
+        "DonSeptico",
+        "Jonjong",
+        "Solipsis",
+        "StaticTango",
+        "x69unknown69x",
+        "Jamy",
+        "A-True-Failure",
+        "Knockmen",
+        "Simichent"
+    ],
+    "trained": {
+        "Kazama-Yokaze": "Y",
+        "Tom": "Y",
+        "Joshy_1": "Y",
+        "DonSeptico": "Y",
+        "Solipsis": "Y",
+        "Jonjong": "Y",
+        "x69unknown69x": "Y",
+        "StaticTango": "N",
+        "Jamy": "N",
+        "A-True-Failure": "N",
+        "Simichent": "N",
+        "Knockmen": "N"
+    }
+}
