@@ -274,6 +274,25 @@ scheduler.add_job(sync_torn_data, "cron", hour=21, minute=0)  # 9 PM UK
 import asyncio
 
 @bot.event
+async def on_member_join(member: discord.Member):
+    # the server (guild) where the bot is running
+    guild = member.guild
+
+    # your welcome message
+    welcome_message = (
+        f"👋 Welcome to **{guild.name}**, {member.mention}!\n"
+        "Please use the `/verify` command to get your employee role."
+    )
+
+    # pick the channel you want the message in
+    # easiest: first text channel named 'general'
+    channel = discord.utils.get(guild.text_channels, name="general")
+
+    if channel:
+        await channel.send(welcome_message)
+
+
+@bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
     try:
@@ -289,3 +308,4 @@ async def on_ready():
 if __name__ == "__main__":
     import asyncio
     asyncio.run(bot.start(TOKEN))
+
