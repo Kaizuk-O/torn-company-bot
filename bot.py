@@ -305,6 +305,9 @@ async def on_ready():
     if not scheduler.running:
         scheduler.start()
         print("📅 Scheduler started.")
+        
+    print(f"✅ Intents.members = {bot.intents.members}")
+
 
 if __name__ == "__main__":
     import asyncio
