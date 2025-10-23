@@ -270,7 +270,7 @@ async def verify(interaction: discord.Interaction):
 
 # --- Scheduler ---
 scheduler = AsyncIOScheduler(timezone=tz)
-scheduler.add_job(sync_torn_data, "cron", hour=21, minute=0)  # 9 PM UK
+scheduler.add_job(sync_torn_data, "cron", hour=18, minute=30)  # 9 PM UK
 
 import asyncio
 
