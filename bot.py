@@ -180,7 +180,7 @@ async def status(interaction: discord.Interaction):
         await interaction.response.send_message("🚫 You don’t have permission to use this command.", ephemeral=True)
         return
 
-    await interaction.response.defer()  # <--- acknowledge immediately
+    await interaction.response.defer()
 
     try:
         data = load_data()
@@ -193,7 +193,7 @@ async def status(interaction: discord.Interaction):
         trains = company["company_detailed"].get("trains_available", 0) if company else "N/A"
 
         now = datetime.now(tz)
-        next_sync_time = now.replace(hour=21, minute=0, second=0, microsecond=0)
+        next_sync_time = now.replace(hour=18, minute=30, second=0, microsecond=0)
         if next_sync_time < now:
             next_sync_time += timedelta(days=1)
         time_until_next = next_sync_time - now
@@ -202,15 +202,23 @@ async def status(interaction: discord.Interaction):
 
         last_sync = now.strftime("%Y-%m-%d %H:%M")
 
-        msg = (
-            f"🏢 **Company:** Violent RE:Solutions\n"
-            f"📅 **Last Sync:** {last_sync} (UK)\n"
-            f"🔄 **Next Sync:** in {hours}h {minutes}m\n"
-            f"💪 **Trains Available:** {trains}\n"
-            f"🎯 **Rotation Progress:** {trained_count} / {total} trained"
+        # create fancy embed
+        embed = discord.Embed(
+            title="📊 Company Status Overview",
+            description=f"Summary for **Violent RE:Solutions**",
+            color=discord.Color.blurple(),
+            timestamp=datetime.now()
         )
+        embed.add_field(name="🏢 Company", value="Violent RE:Solutions", inline=True)
+        embed.add_field(name="💪 Trains Available", value=str(trains), inline=True)
+        embed.add_field(name="📅 Last Sync", value=f"{last_sync} (UK)", inline=False)
+        embed.add_field(name="🔄 Next Sync", value=f"In {hours}h {minutes}m (18:30 UK)", inline=False)
+        embed.add_field(name="🎯 Rotation Progress", value=f"{trained_count}/{total} trained", inline=True)
 
-        await interaction.followup.send(msg)  # <--- send after work is done
+        embed.set_footer(text="Updated live from Torn API", icon_url="https://torn.com/favicon.ico")
+
+        await interaction.followup.send(embed=embed)
+
     except Exception as e:
         print(f"Error in /status: {e}")
         await interaction.followup.send("⚠️ Failed to retrieve status.", ephemeral=True)
@@ -312,5 +320,6 @@ async def on_ready():
 if __name__ == "__main__":
     import asyncio
     asyncio.run(bot.start(TOKEN))
+
 
 
