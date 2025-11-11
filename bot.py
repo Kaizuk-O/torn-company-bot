@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import requests
 import discord
 from discord.ext import commands
+from discord import app_commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import pytz
 from dotenv import load_dotenv
@@ -35,13 +36,17 @@ SYNC_HOUR = 19
 SYNC_MINUTE = 30
 tz = pytz.timezone(TIMEZONE)
 
+# Guild object for scoping slash commands (prevents duplicates)
+GUILD_OBJ = discord.Object(id=GUILD_ID) if GUILD_ID else None
+_COMMANDS_SYNCED = False
+
 # ---------------------------
 # Discord Intents / Bot
 # ---------------------------
 intents = discord.Intents.default()
 intents.guilds = True
 intents.members = True           # for on_member_join
-intents.message_content = True   # not needed for slash cmds, but harmless
+intents.message_content = True   # optional
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ---------------------------
@@ -182,24 +187,30 @@ def scheduled_sync():
 # ---------------------------
 @bot.event
 async def on_ready():
+    global _COMMANDS_SYNCED
     try:
-        if GUILD_ID:
-            guild_obj = discord.Object(id=GUILD_ID)
-            bot.tree.copy_global_to(guild=guild_obj)
-            await bot.tree.sync(guild=guild_obj)
-            logging.info(f"🔁 Synced slash commands to guild {GUILD_ID}.")
+        # Sync ONLY to the guild once; do NOT copy globals (prevents duplicates)
+        if not _COMMANDS_SYNCED:
+            if GUILD_OBJ:
+                await bot.tree.sync(guild=GUILD_OBJ)
+                logging.info(f"🔁 Synced slash commands to guild {GUILD_ID}.")
+            else:
+                await bot.tree.sync()
+                logging.info("🔁 Synced slash commands globally (no GUILD_ID set).")
+            _COMMANDS_SYNCED = True
         else:
-            await bot.tree.sync()
-            logging.info("🔁 Synced slash commands globally.")
+            logging.info("🔁 Commands already synced; skipping re-sync.")
     except Exception:
         logging.exception("Failed to sync commands")
 
     logging.info(f"✅ Logged in as {bot.user} ({bot.user.id})")
 
+    # Start scheduler once
     try:
-        scheduler.add_job(scheduled_sync, "cron", hour=SYNC_HOUR, minute=SYNC_MINUTE)
-        scheduler.start()
-        logging.info("📅 Scheduler started (daily 19:30 UK).")
+        if not scheduler.running:
+            scheduler.add_job(scheduled_sync, "cron", hour=SYNC_HOUR, minute=SYNC_MINUTE)
+            scheduler.start()
+            logging.info("📅 Scheduler started (daily 19:30 UK).")
     except Exception:
         logging.exception("Failed to start scheduler")
 
@@ -216,13 +227,33 @@ async def on_member_join(member: discord.Member):
             logging.exception("Failed to send welcome message")
 
 # ---------------------------
-# Commands
+# Slash Commands (guild-scoped to avoid duplicates)
 # ---------------------------
+def require_company_role():
+    def wrapper(func):
+        async def inner(interaction: discord.Interaction, *args, **kwargs):
+            if not has_company_role(interaction):
+                await interaction.response.send_message("🚫 You don’t have permission.", ephemeral=True)
+                return
+            return await func(interaction, *args, **kwargs)
+        return inner
+    return wrapper
+
+def require_director():
+    def wrapper(func):
+        async def inner(interaction: discord.Interaction, *args, **kwargs):
+            if not is_director(interaction):
+                await interaction.response.send_message("🚫 Directors only.", ephemeral=True)
+                return
+            return await func(interaction, *args, **kwargs)
+        return inner
+    return wrapper
+
+# --- /forceupdate
+@app_commands.guilds(GUILD_OBJ) if GUILD_OBJ else (lambda f: f)
 @bot.tree.command(name="forceupdate", description="Director only: force a Torn company sync now")
+@require_director()
 async def forceupdate(interaction: discord.Interaction):
-    if not is_director(interaction):
-        await interaction.response.send_message("🚫 Directors only.", ephemeral=True)
-        return
     await interaction.response.defer(ephemeral=True)
     ok = sync_torn_data()
     if ok:
@@ -230,11 +261,11 @@ async def forceupdate(interaction: discord.Interaction):
     else:
         await interaction.followup.send("❌ Failed to sync (check Torn API / logs).", ephemeral=True)
 
+# --- /status
+@app_commands.guilds(GUILD_OBJ) if GUILD_OBJ else (lambda f: f)
 @bot.tree.command(name="status", description="Show company sync and training status summary")
+@require_company_role()
 async def status(interaction: discord.Interaction):
-    if not has_company_role(interaction):
-        await interaction.response.send_message("🚫 You don’t have permission.", ephemeral=True)
-        return
     await interaction.response.defer()
     try:
         data = load_data()
@@ -272,11 +303,11 @@ async def status(interaction: discord.Interaction):
         logging.exception("Error in /status")
         await interaction.followup.send("⚠️ Failed to retrieve status.", ephemeral=True)
 
+# --- /rotation
+@app_commands.guilds(GUILD_OBJ) if GUILD_OBJ else (lambda f: f)
 @bot.tree.command(name="rotation", description="Show current rotation and trained status")
+@require_company_role()
 async def rotation(interaction: discord.Interaction):
-    if not has_company_role(interaction):
-        await interaction.response.send_message("🚫 You don’t have permission.", ephemeral=True)
-        return
     await interaction.response.defer()
     try:
         data = load_data()
@@ -293,11 +324,11 @@ async def rotation(interaction: discord.Interaction):
         logging.exception("Error in /rotation")
         await interaction.followup.send("⚠️ Error processing /rotation.", ephemeral=True)
 
+# --- /remaining
+@app_commands.guilds(GUILD_OBJ) if GUILD_OBJ else (lambda f: f)
 @bot.tree.command(name="remaining", description="Show employees who still need training this rotation")
+@require_company_role()
 async def remaining(interaction: discord.Interaction):
-    if not has_company_role(interaction):
-        await interaction.response.send_message("🚫 You don’t have permission.", ephemeral=True)
-        return
     await interaction.response.defer()
     try:
         data = load_data()
@@ -316,11 +347,11 @@ async def remaining(interaction: discord.Interaction):
         logging.exception("Error in /remaining")
         await interaction.followup.send("⚠️ Error processing /remaining.", ephemeral=True)
 
+# --- /train
+@app_commands.guilds(GUILD_OBJ) if GUILD_OBJ else (lambda f: f)
 @bot.tree.command(name="train", description="Mark an employee as trained for this rotation")
+@require_director()
 async def train_cmd(interaction: discord.Interaction, name: str):
-    if not is_director(interaction):
-        await interaction.response.send_message("🚫 Directors only.", ephemeral=True)
-        return
     await interaction.response.defer()  # public so the channel sees it
 
     data = load_data()
@@ -353,11 +384,11 @@ async def train_cmd(interaction: discord.Interaction, name: str):
     nxt = remaining_list[0] if remaining_list else "—"
     await interaction.followup.send(f"✅ Marked **{target}** as trained.\n🔜 Next up: **{nxt}**")
 
+# --- /resetrotation
+@app_commands.guilds(GUILD_OBJ) if GUILD_OBJ else (lambda f: f)
 @bot.tree.command(name="resetrotation", description="Director only: manually reset the entire training rotation (failsafe)")
+@require_director()
 async def resetrotation(interaction: discord.Interaction):
-    if not is_director(interaction):
-        await interaction.response.send_message("🚫 Directors only.", ephemeral=True)
-        return
     await interaction.response.defer(ephemeral=True)
     try:
         data = load_data()
@@ -372,6 +403,21 @@ async def resetrotation(interaction: discord.Interaction):
     except Exception:
         logging.exception("Error in /resetrotation")
         await interaction.followup.send("❌ Failed to reset rotation. Check logs.", ephemeral=True)
+
+# --- (Optional) prune old global commands once, then remove this
+@app_commands.guilds(GUILD_OBJ) if GUILD_OBJ else (lambda f: f)
+@bot.tree.command(name="prune_globals", description="Director only: remove any globally-registered commands")
+@require_director()
+async def prune_globals(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        # Clear global definitions locally and sync (push empty set)
+        bot.tree.clear_commands(guild=None)
+        await bot.tree.sync()  # sync empty global set
+        await interaction.followup.send("🧹 Pruned global commands. All commands are now guild-scoped.")
+    except Exception:
+        logging.exception("Failed to prune global commands")
+        await interaction.followup.send("⚠️ Failed to prune global commands.", ephemeral=True)
 
 # ---------------------------
 # Run
