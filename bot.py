@@ -1,241 +1,178 @@
-import os
-import json
-import re
-import logging
-from datetime import datetime, timedelta
-
-import requests
 import discord
-from discord.ext import commands
-from discord import app_commands
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from discord.ext import commands, tasks
+import requests
+import json
+import os
+from datetime import datetime
 import pytz
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 
-# ---------------------------
-# Logging (unbuffered for VPS)
-# ---------------------------
-logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
-logging.getLogger("discord").setLevel(logging.WARNING)
-
-# ---------------------------
-# Env / Config
-# ---------------------------
 load_dotenv()
 
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
-TORN_API_KEY = os.getenv("TORN_API_KEY", "").strip()
-DIRECTOR_ID = int(os.getenv("DISCORD_USER_ID", "0"))
-GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
+TOKEN = os.getenv("DISCORD_TOKEN")
+TORN_KEY = os.getenv("TORN_API_KEY")
+USER_ID = int(os.getenv("DISCORD_USER_ID"))
 TIMEZONE = os.getenv("TIMEZONE", "Europe/London")
 
-# welcome channel name (change if needed)
-WELCOME_CHANNEL_NAME = os.getenv("WELCOME_CHANNEL", "general")
-
-# data file (rotation + snapshot)
-DATA_FILE = os.getenv("DATA_FILE", "data.json")
-
-# scheduler time (18:30 local)
-SYNC_HOUR = 18
-SYNC_MINUTE = 30
-
-tz = pytz.timezone(TIMEZONE)
-
-# ---------------------------
-# Discord Intents / Bot
-# ---------------------------
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
-intents.members = True  # required for on_member_join
-
+intents.members = True   # 👈 REQUIRED for on_member_join
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ---------------------------
-# Utils: data store
-# ---------------------------
-def load_data() -> dict:
-    if not os.path.exists(DATA_FILE):
-        return {"employees": [], "trained": {}, "rotation_cycle": 0, "company_snapshot": {}, "last_sync": None}
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        logging.exception("Failed to load data.json")
-        return {"employees": [], "trained": {}, "rotation_cycle": 0, "company_snapshot": {}, "last_sync": None}
 
-def save_data(d: dict):
-    try:
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(d, f, indent=2)
-    except Exception:
-        logging.exception("Failed to save data.json")
+DATA_FILE = "rotation.json"
+tz = pytz.timezone(TIMEZONE)
 
-# ---------------------------
-# Utils: names / rotation
-# ---------------------------
-def norm(name: str) -> str:
-    return re.sub(r"\s+", " ", (name or "")).strip().casefold()
-
-def all_trained(data: dict) -> bool:
-    emps = data.get("employees", [])
-    trained = data.get("trained", {})
-    return bool(emps) and all(trained.get(e, "N") == "Y" for e in emps)
-
-def reset_rotation(data: dict):
-    trained = data.setdefault("trained", {})
-    for e in data.get("employees", []):
-        trained[e] = "N"
-    data["rotation_cycle"] = data.get("rotation_cycle", 0) + 1
-    save_data(data)
-    logging.info(f"Rotation reset (cycle #{data['rotation_cycle']}).")
-
-def is_director(interaction: discord.Interaction) -> bool:
-    return interaction.user.id == DIRECTOR_ID or any(r.name.lower() == "director" for r in getattr(interaction.user, "roles", []))
+# --- Role Check ---
 
 def has_company_role(interaction: discord.Interaction) -> bool:
-    if interaction.user.id == DIRECTOR_ID:
-        return True
-    roles = [r.name.lower() for r in getattr(interaction.user, "roles", [])]
-    return ("employee" in roles) or ("director" in roles)
+    """Check if the user has Employee or Director role."""
+    allowed_roles = {"employee", "director"}
+    user_roles = {r.name.lower() for r in interaction.user.roles}
+    return bool(allowed_roles.intersection(user_roles))
 
-# ---------------------------
-# Torn API
-# ---------------------------
-def get_company_data() -> dict | None:
-    if not TORN_API_KEY:
-        logging.error("Missing TORN_API_KEY")
-        return None
-    url = f"https://api.torn.com/company/?selections=detailed,employees&key={TORN_API_KEY}"
+
+
+# --- Helper Functions ---
+def get_company_data():
+    url = f"https://api.torn.com/company/?selections=detailed,employees&key={TORN_KEY}"
     try:
-        r = requests.get(url, timeout=15)
-        r.raise_for_status()
-        data = r.json()
-        # Basic sanity check
-        if "company_detailed" in data and "company_employees" in data:
-            return data
-        logging.error("Torn API returned unexpected structure.")
-        return None
+        response = requests.get(url)
+        data = response.json()
+        return data
     except Exception as e:
-        logging.exception("Error fetching Torn API")
+        print(f"Error fetching Torn API: {e}")
         return None
 
-def sync_torn_data() -> bool:
-    """Fetch Torn company, merge rotation safely, auto-reset if everyone is trained."""
-    base = load_data()
+def load_data():
+    if not os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "w") as f:
+            json.dump({"employees": [], "trained": {}}, f)
+    with open(DATA_FILE, "r") as f:
+        return json.load(f)
+
+def save_data(data):
+    with open(DATA_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
+# --- Torn Sync Job ---
+# --- Torn Sync Job ---
+def sync_torn_data():
+    data = load_data()
     company = get_company_data()
     if not company or "company_employees" not in company:
-        logging.error("Error: invalid Torn data.")
-        return False
+        print("Error: invalid Torn data.")
+        return
 
-    # Build ordered employee list (oldest first, then name)
-    api_emps = [emp["name"] for _, emp in sorted(
+    employees = []
+
+    # Sort by days_in_company DESC (oldest first), tie-break by name for stability
+    emp_items = sorted(
         company["company_employees"].items(),
-        key=lambda kv: (-int(kv[1].get("days_in_company", 0)), kv[1].get("name", "").lower())
-    )]
+        key=lambda x: (-int(x[1].get("days_in_company", 0)), x[1].get("name","").lower())
+)
+    employees = [e["name"] for _, e in emp_items]
 
-    trained = base.setdefault("trained", {})
 
-    # Drop leavers
-    for k in list(trained.keys()):
-        if k not in api_emps:
-            trained.pop(k, None)
+    data["employees"] = employees
+    for name in employees:
+        data["trained"].setdefault(name, "N")
 
-    # Init new hires
-    for e in api_emps:
-        trained.setdefault(e, "N")
-
-    base["employees"] = api_emps
-    base["company_snapshot"] = company
-    base["last_sync"] = datetime.now(tz).strftime("%Y-%m-%d %H:%M")
-    save_data(base)
-
-    # If everyone is trained (even after reordering), reset
-    if all_trained(base):
-        reset_rotation(base)
+    save_data(data)
+    print(f"[{datetime.now(tz).strftime('%H:%M:%S')}] Torn company sync complete.")
 
     trains = company["company_detailed"].get("trains_available", 0)
-    logging.info(f"[sync] Employees: {len(api_emps)}, trains={trains}")
-    return True
-
-# ---------------------------
-# Scheduler job
-# ---------------------------
-scheduler = AsyncIOScheduler(timezone=tz)
-
-async def dm_director(message: str):
-    try:
-        user = await bot.fetch_user(DIRECTOR_ID)
-        if user:
-            await user.send(message)
-    except Exception:
-        logging.exception("Failed to DM director")
-
-def scheduled_sync():
-    """Runs at 18:30 local every day: sync + DM if trains >= 10."""
-    ok = sync_torn_data()
-    if not ok:
-        return
-    data = load_data()
-    company = data.get("company_snapshot", {})
-    trains = 0
-    try:
-        trains = int(company.get("company_detailed", {}).get("trains_available", 0))
-    except Exception:
-        trains = 0
     if trains >= 10:
-        # dispatch coroutine from scheduler thread
-        bot.loop.create_task(dm_director(f"🔔 **Trains available: {trains}** — time to train two employees (5× each)."))
+        asyncio.run_coroutine_threadsafe(
+            notify_trains_available(trains),
+            bot.loop
+        )
 
-# ---------------------------
-# Discord Events
-# ---------------------------
-@bot.event
-async def on_ready():
-    try:
-        await bot.tree.sync()
-        logging.info("🔁 Synced slash commands.")
-    except Exception:
-        logging.exception("Failed to sync commands")
-    logging.info(f"✅ Logged in as {bot.user} ({bot.user.id})")
 
-    # start scheduler exactly once
-    try:
-        scheduler.add_job(scheduled_sync, "cron", hour=SYNC_HOUR, minute=SYNC_MINUTE)
-        scheduler.start()
-        logging.info("📅 Scheduler started.")
-    except Exception:
-        logging.exception("Failed to start scheduler (already running?)")
+async def notify_trains_available(trains):
+    user = await bot.fetch_user(USER_ID)
+    await user.send(f"🚨 You have **{trains}** company trains available!")
 
-@bot.event
-async def on_member_join(member: discord.Member):
-    # Welcome message to a specific channel
+# --- Commands ---
+import re
+
+async def verify_employee(member: discord.Member):
+    """Checks member nickname for Torn name and gives/removes Employee role."""
+    data = load_data()
+    rotation_names = [n.lower() for n in data.get("employees", [])]
     guild = member.guild
-    channel = discord.utils.get(guild.text_channels, name=WELCOME_CHANNEL_NAME)
-    if channel:
-        try:
-            await channel.send(
-                f"👋 Welcome to **{guild.name}**, {member.mention}!\n"
-                "Please use the `/verify` command to get your employee role."
-            )
-        except Exception:
-            logging.exception("Failed to send welcome message")
 
-# ---------------------------
-# Slash Commands
-# ---------------------------
-@bot.tree.command(name="forceupdate", description="Director only: force a Torn company sync now")
-async def forceupdate(interaction: discord.Interaction):
-    if not is_director(interaction):
-        await interaction.response.send_message("🚫 Directors only.", ephemeral=True)
+    # Find (or create) Employee role
+    role = discord.utils.get(guild.roles, name="Employee")
+    if not role:
+        role = await guild.create_role(name="Employee", reason="Auto-created by bot")
+
+    # Extract Torn name from nickname
+    nickname = member.nick or member.name
+    match = re.match(r"^(.+?)\s*\[\d+\]", nickname)
+    torn_name = match.group(1).strip().lower() if match else nickname.lower()
+
+    if torn_name in rotation_names:
+        if role not in member.roles:
+            await member.add_roles(role, reason="Matched in rotation list")
+            return f"✅ Verified and Employee role assigned! Welcome, {torn_name.title()}."
+        else:
+            return f"✅ Already verified, {torn_name.title()}."
+    else:
+        # Not in company rotation
+        if role in member.roles:
+            await member.remove_roles(role, reason="No longer in company list")
+        return f"🚫 {torn_name.title()} not found in the current company rotation list."
+
+
+@bot.tree.command(name="rotation", description="Show the current training rotation order")
+async def rotation(interaction: discord.Interaction):
+    if not has_company_role(interaction):
+        await interaction.response.send_message("🚫 You don’t have permission to use this command.", ephemeral=True)
         return
 
-    await interaction.response.defer(ephemeral=True)
-    ok = sync_torn_data()
-    if ok:
-        await interaction.followup.send("✅ Torn company data synced successfully.")
-    else:
-        await interaction.followup.send("❌ Failed to sync (check Torn API / logs).", ephemeral=True)
+    data = load_data()
+    data = load_data()
+    employees = data.get("employees", [])
+    trained = data.get("trained", {})
+    if not employees:
+        await interaction.response.send_message("No employee data yet. Wait for the 9 PM update.", ephemeral=True)
+        return
+
+    msg = "**Training Rotation Order:**\n"
+    for i, name in enumerate(employees, start=1):
+        status = "✅" if trained.get(name) == "Y" else "❌"
+        msg += f"{i}. {name} — {status}\n"
+    await interaction.response.send_message(msg)
+
+@bot.tree.command(name="remaining", description="Show employees who still need training this rotation")
+async def remaining(interaction: discord.Interaction):
+    if not has_company_role(interaction):
+        await interaction.response.send_message("🚫 You don’t have permission to use this command.", ephemeral=True)
+        return
+
+    try:
+        data = load_data()
+        trained = data.get("trained", {})
+        employees = data.get("employees", [])
+
+        if not employees:
+            await interaction.response.send_message("⚠️ No employee data available yet. Try running /forceupdate first.", ephemeral=True)
+            return
+
+        remaining_list = [n for n in employees if trained.get(n) != "Y"]
+        if remaining_list:
+            msg = "**Employees left to train:**\n" + "\n".join([f"❌ {name}" for name in remaining_list])
+        else:
+            msg = "✅ All employees are trained this rotation!"
+
+        await interaction.response.send_message(msg)
+    except Exception as e:
+        print(f"Error in /remaining: {e}")
+        await interaction.response.send_message("⚠️ An unexpected error occurred while processing /remaining.", ephemeral=True)
+
 
 @bot.tree.command(name="status", description="Show company sync and training status summary")
 async def status(interaction: discord.Interaction):
@@ -243,7 +180,7 @@ async def status(interaction: discord.Interaction):
         await interaction.response.send_message("🚫 You don’t have permission to use this command.", ephemeral=True)
         return
 
-    await interaction.response.defer()
+    await interaction.response.defer()  # <--- acknowledge immediately
 
     try:
         data = load_data()
@@ -252,156 +189,128 @@ async def status(interaction: discord.Interaction):
         trained_count = sum(1 for v in trained.values() if v == "Y")
         total = len(employees)
 
-        snap = data.get("company_snapshot", {})
-        trains = snap.get("company_detailed", {}).get("trains_available", "N/A")
-        last_sync = data.get("last_sync", "N/A")
+        company = get_company_data()
+        trains = company["company_detailed"].get("trains_available", 0) if company else "N/A"
 
         now = datetime.now(tz)
-        next_sync_time = now.replace(hour=SYNC_HOUR, minute=SYNC_MINUTE, second=0, microsecond=0)
+        next_sync_time = now.replace(hour=21, minute=0, second=0, microsecond=0)
         if next_sync_time < now:
             next_sync_time += timedelta(days=1)
-        delta = next_sync_time - now
-        hours, rem = divmod(int(delta.total_seconds()), 3600)
-        minutes = rem // 60
+        time_until_next = next_sync_time - now
+        hours, remainder = divmod(int(time_until_next.total_seconds()), 3600)
+        minutes = remainder // 60
 
-        embed = discord.Embed(
-            title="📊 Company Status Overview",
-            description=f"Summary for **Violent RE:Solutions**",
-            color=discord.Color.blurple(),
-            timestamp=datetime.now()
+        last_sync = now.strftime("%Y-%m-%d %H:%M")
+
+        msg = (
+            f"🏢 **Company:** Violent RE:Solutions\n"
+            f"📅 **Last Sync:** {last_sync} (UK)\n"
+            f"🔄 **Next Sync:** in {hours}h {minutes}m\n"
+            f"💪 **Trains Available:** {trains}\n"
+            f"🎯 **Rotation Progress:** {trained_count} / {total} trained"
         )
-        embed.add_field(name="🏢 Company", value="Violent RE:Solutions", inline=True)
-        embed.add_field(name="💪 Trains Available", value=str(trains), inline=True)
-        embed.add_field(name="📅 Last Sync", value=f"{last_sync} (UK)", inline=False)
-        embed.add_field(name="🔄 Next Sync", value=f"In {hours}h {minutes}m ({SYNC_HOUR:02d}:{SYNC_MINUTE:02d} UK)", inline=False)
-        embed.add_field(name="🎯 Rotation Progress", value=f"{trained_count}/{total} trained", inline=True)
-        embed.set_footer(text="Updated via Torn API")
 
-        await interaction.followup.send(embed=embed)
-    except Exception:
-        logging.exception("Error in /status")
+        await interaction.followup.send(msg)  # <--- send after work is done
+    except Exception as e:
+        print(f"Error in /status: {e}")
         await interaction.followup.send("⚠️ Failed to retrieve status.", ephemeral=True)
 
-@bot.tree.command(name="rotation", description="Show current rotation and trained status")
-async def rotation(interaction: discord.Interaction):
-    if not has_company_role(interaction):
-        await interaction.response.send_message("🚫 You don’t have permission.", ephemeral=True)
+
+@bot.tree.command(name="train", description="(Owner only) Mark an employee as trained")
+async def train(interaction: discord.Interaction, name: str):
+    # Restrict to owner ID only
+    if interaction.user.id != 209088844186910722:
+        await interaction.response.send_message("🚫 You don’t have permission to do that.", ephemeral=True)
         return
-
-    await interaction.response.defer()
-    try:
-        data = load_data()
-        emps = data.get("employees", [])
-        trained = data.get("trained", {})
-
-        if not emps:
-            await interaction.followup.send("⚠️ No employees loaded. Try `/forceupdate` first.", ephemeral=True)
-            return
-
-        lines = [f"{e} — {'✅' if trained.get(e) == 'Y' else '❌'}" for e in emps]
-        if all_trained(data):
-            lines.append("\n🔁 All trained — rotation will reset automatically on the next mark.")
-        await interaction.followup.send("\n".join(lines))
-    except Exception:
-        logging.exception("Error in /rotation")
-        await interaction.followup.send("⚠️ Error processing /rotation.", ephemeral=True)
-
-@bot.tree.command(name="remaining", description="Show employees who still need training this rotation")
-async def remaining(interaction: discord.Interaction):
-    if not has_company_role(interaction):
-        await interaction.response.send_message("🚫 You don’t have permission to use this command.", ephemeral=True)
-        return
-
-    await interaction.response.defer()
-    try:
-        data = load_data()
-        emps = data.get("employees", [])
-        trained = data.get("trained", {})
-
-        if not emps:
-            await interaction.followup.send("⚠️ No employee data available yet. Try `/forceupdate`.", ephemeral=True)
-            return
-
-        remaining_list = [e for e in emps if trained.get(e, "N") != "Y"]
-
-        if remaining_list:
-            msg = "**Employees left to train:**\n" + "\n".join([f"❌ {name}" for name in remaining_list])
-        else:
-            msg = "✅ All employees are trained this rotation!"
-        await interaction.followup.send(msg)
-
-    except Exception:
-        logging.exception("Error in /remaining")
-        await interaction.followup.send("⚠️ Error processing /remaining.", ephemeral=True)
-
-@bot.tree.command(name="train", description="Mark an employee as trained for this rotation")
-async def train_cmd(interaction: discord.Interaction, name: str):
-    if not is_director(interaction):
-        await interaction.response.send_message("🚫 Directors only.", ephemeral=True)
-        return
-
-    await interaction.response.defer()  # public update
 
     data = load_data()
-    employees = data.get("employees", [])
-    trained = data.setdefault("trained", {})
-
-    target = None
-    nkey = norm(name)
-    for e in employees:
-        if norm(e) == nkey:
-            target = e
-            break
-
-    if not target:
-        await interaction.followup.send(f"❌ Employee '{name}' not found in current rotation.", ephemeral=True)
+    if name not in data["trained"]:
+        await interaction.response.send_message("Employee not found in rotation.")
         return
 
-    trained[target] = "Y"
+    data["trained"][name] = "Y"
     save_data(data)
+    await interaction.response.send_message(f"✅ {name} marked as trained.")
 
-    # Auto-reset when everyone is trained
-    if all_trained(data):
-        reset_rotation(data)
-        await interaction.followup.send(
-            f"✅ Marked **{target}** as trained.\n🔁 All employees trained — rotation **reset** (cycle #{data['rotation_cycle']})."
-        )
+    # Reset if all trained
+    if all(v == "Y" for v in data["trained"].values()):
+        for n in data["trained"]:
+            data["trained"][n] = "N"
+        save_data(data)
+        await interaction.followup.send("♻️ All employees trained! Rotation reset.")
+
+
+@bot.tree.command(name="forceupdate", description="(Owner only) Manually sync company data from Torn API now")
+async def forceupdate(interaction: discord.Interaction):
+    # Restrict to owner ID only
+    if interaction.user.id != 209088844186910722:
+        await interaction.response.send_message("🚫 You don’t have permission to do that.", ephemeral=True)
         return
 
-    # Otherwise show next up
-    remaining_list = [e for e in employees if data["trained"].get(e) != "Y"]
-    nxt = remaining_list[0] if remaining_list else "—"
-    await interaction.followup.send(f"✅ Marked **{target}** as trained.\n🔜 Next up: **{nxt}**")
+    await interaction.response.defer(thinking=True)
+    sync_torn_data()
+    await interaction.followup.send("🔄 Forced Torn data update complete.")
 
-@bot.tree.command(name="resetrotation", description="Director only: manually reset the entire training rotation (failsafe)")
-async def resetrotation(interaction: discord.Interaction):
-    if not is_director(interaction):
-        await interaction.response.send_message("🚫 Directors only.", ephemeral=True)
-        return
+@bot.tree.command(name="verify", description="Verify your Torn account and receive the Employee role if eligible")
+async def verify(interaction: discord.Interaction):
+    member = interaction.user
 
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer(thinking=True)
+    result_msg = await verify_employee(member)
+    await interaction.followup.send(result_msg, ephemeral=True)
+
+
+
+    # Reset if all trained
+    if all(v == "Y" for v in data["trained"].values()):
+        for n in data["trained"]:
+            data["trained"][n] = "N"
+        save_data(data)
+        await interaction.followup.send("♻️ All employees trained! Rotation reset.")
+
+# --- Scheduler ---
+scheduler = AsyncIOScheduler(timezone=tz)
+scheduler.add_job(sync_torn_data, "cron", hour=21, minute=0)  # 9 PM UK
+
+import asyncio
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    # the server (guild) where the bot is running
+    guild = member.guild
+
+    # your welcome message
+    welcome_message = (
+        f"👋 Welcome to **{guild.name}**, {member.mention}!\n"
+        "Please use the `/verify` command to get your employee role."
+    )
+
+    # pick the channel you want the message in
+    # easiest: first text channel named 'general'
+    channel = discord.utils.get(guild.text_channels, name="general")
+
+    if channel:
+        await channel.send(welcome_message)
+
+
+@bot.event
+async def on_ready():
+    print(f"✅ Logged in as {bot.user}")
     try:
-        data = load_data()
-        if not data.get("employees"):
-            await interaction.followup.send("⚠️ No employees loaded. Try `/forceupdate` first.", ephemeral=True)
-            return
+        synced = await bot.tree.sync()
+        print(f"🔁 Synced {len(synced)} commands globally.")
+    except Exception as e:
+        print(f"⚠️ Command sync failed: {e}")
 
-        reset_rotation(data)
-        await interaction.followup.send(
-            f"🔁 Rotation has been **manually reset** (cycle #{data['rotation_cycle']}).",
-            ephemeral=False
-        )
-    except Exception:
-        logging.exception("Error in /resetrotation")
-        await interaction.followup.send("❌ Failed to reset rotation. Check logs.", ephemeral=True)
+    if not scheduler.running:
+        scheduler.start()
+        print("📅 Scheduler started.")
+        
+    print(f"✅ Intents.members = {bot.intents.members}")
 
-# ---------------------------
-# Run
-# ---------------------------
+
 if __name__ == "__main__":
-    if not DISCORD_TOKEN:
-        raise SystemExit("Missing DISCORD_TOKEN in .env")
-    if not TORN_API_KEY:
-        logging.warning("No TORN_API_KEY set — some features will not work.")
+    import asyncio
+    asyncio.run(bot.start(TOKEN))
 
-    bot.run(DISCORD_TOKEN)
+
