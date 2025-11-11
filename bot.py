@@ -88,13 +88,13 @@ def reset_rotation(data: dict):
     save_data(data)
     logging.info(f"Rotation reset (cycle #{data['rotation_cycle']}).")
 
-def is_director(interaction: discord.Interaction) -> bool:
+def director_check(interaction: discord.Interaction) -> bool:
     if interaction.user.id == DIRECTOR_ID:
         return True
     roles = [r.name.lower() for r in getattr(interaction.user, "roles", [])]
     return "director" in roles
 
-def has_company_role(interaction: discord.Interaction) -> bool:
+def company_role_check(interaction: discord.Interaction) -> bool:
     if interaction.user.id == DIRECTOR_ID:
         return True
     roles = [r.name.lower() for r in getattr(interaction.user, "roles", [])]
@@ -229,30 +229,12 @@ async def on_member_join(member: discord.Member):
 # ---------------------------
 # Slash Commands (guild-scoped to avoid duplicates)
 # ---------------------------
-def require_company_role():
-    def wrapper(func):
-        async def inner(interaction: discord.Interaction, *args, **kwargs):
-            if not has_company_role(interaction):
-                await interaction.response.send_message("🚫 You don’t have permission.", ephemeral=True)
-                return
-            return await func(interaction, *args, **kwargs)
-        return inner
-    return wrapper
 
-def require_director():
-    def wrapper(func):
-        async def inner(interaction: discord.Interaction, *args, **kwargs):
-            if not is_director(interaction):
-                await interaction.response.send_message("🚫 Directors only.", ephemeral=True)
-                return
-            return await func(interaction, *args, **kwargs)
-        return inner
-    return wrapper
-
-# --- /forceupdate
-@app_commands.guilds(GUILD_OBJ) if GUILD_OBJ else (lambda f: f)
+# --- /forceupdate (director only)
+if GUILD_OBJ:
+    @app_commands.guilds(GUILD_OBJ)
 @bot.tree.command(name="forceupdate", description="Director only: force a Torn company sync now")
-@require_director()
+@app_commands.check(director_check)
 async def forceupdate(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     ok = sync_torn_data()
@@ -261,10 +243,16 @@ async def forceupdate(interaction: discord.Interaction):
     else:
         await interaction.followup.send("❌ Failed to sync (check Torn API / logs).", ephemeral=True)
 
-# --- /status
-@app_commands.guilds(GUILD_OBJ) if GUILD_OBJ else (lambda f: f)
+@forceupdate.error
+async def forceupdate_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.CheckFailure):
+        await interaction.response.send_message("🚫 Directors only.", ephemeral=True)
+
+# --- /status (employee or director)
+if GUILD_OBJ:
+    @app_commands.guilds(GUILD_OBJ)
 @bot.tree.command(name="status", description="Show company sync and training status summary")
-@require_company_role()
+@app_commands.check(company_role_check)
 async def status(interaction: discord.Interaction):
     await interaction.response.defer()
     try:
@@ -303,10 +291,16 @@ async def status(interaction: discord.Interaction):
         logging.exception("Error in /status")
         await interaction.followup.send("⚠️ Failed to retrieve status.", ephemeral=True)
 
-# --- /rotation
-@app_commands.guilds(GUILD_OBJ) if GUILD_OBJ else (lambda f: f)
+@status.error
+async def status_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.CheckFailure):
+        await interaction.response.send_message("🚫 You don’t have permission.", ephemeral=True)
+
+# --- /rotation (employee or director)
+if GUILD_OBJ:
+    @app_commands.guilds(GUILD_OBJ)
 @bot.tree.command(name="rotation", description="Show current rotation and trained status")
-@require_company_role()
+@app_commands.check(company_role_check)
 async def rotation(interaction: discord.Interaction):
     await interaction.response.defer()
     try:
@@ -324,10 +318,16 @@ async def rotation(interaction: discord.Interaction):
         logging.exception("Error in /rotation")
         await interaction.followup.send("⚠️ Error processing /rotation.", ephemeral=True)
 
-# --- /remaining
-@app_commands.guilds(GUILD_OBJ) if GUILD_OBJ else (lambda f: f)
+@rotation.error
+async def rotation_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.CheckFailure):
+        await interaction.response.send_message("🚫 You don’t have permission.", ephemeral=True)
+
+# --- /remaining (employee or director)
+if GUILD_OBJ:
+    @app_commands.guilds(GUILD_OBJ)
 @bot.tree.command(name="remaining", description="Show employees who still need training this rotation")
-@require_company_role()
+@app_commands.check(company_role_check)
 async def remaining(interaction: discord.Interaction):
     await interaction.response.defer()
     try:
@@ -347,10 +347,16 @@ async def remaining(interaction: discord.Interaction):
         logging.exception("Error in /remaining")
         await interaction.followup.send("⚠️ Error processing /remaining.", ephemeral=True)
 
-# --- /train
-@app_commands.guilds(GUILD_OBJ) if GUILD_OBJ else (lambda f: f)
+@remaining.error
+async def remaining_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.CheckFailure):
+        await interaction.response.send_message("🚫 You don’t have permission.", ephemeral=True)
+
+# --- /train (director only)
+if GUILD_OBJ:
+    @app_commands.guilds(GUILD_OBJ)
 @bot.tree.command(name="train", description="Mark an employee as trained for this rotation")
-@require_director()
+@app_commands.check(director_check)
 async def train_cmd(interaction: discord.Interaction, name: str):
     await interaction.response.defer()  # public so the channel sees it
 
@@ -384,10 +390,16 @@ async def train_cmd(interaction: discord.Interaction, name: str):
     nxt = remaining_list[0] if remaining_list else "—"
     await interaction.followup.send(f"✅ Marked **{target}** as trained.\n🔜 Next up: **{nxt}**")
 
-# --- /resetrotation
-@app_commands.guilds(GUILD_OBJ) if GUILD_OBJ else (lambda f: f)
+@train_cmd.error
+async def train_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.CheckFailure):
+        await interaction.response.send_message("🚫 Directors only.", ephemeral=True)
+
+# --- /resetrotation (director only)
+if GUILD_OBJ:
+    @app_commands.guilds(GUILD_OBJ)
 @bot.tree.command(name="resetrotation", description="Director only: manually reset the entire training rotation (failsafe)")
-@require_director()
+@app_commands.check(director_check)
 async def resetrotation(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     try:
@@ -404,10 +416,16 @@ async def resetrotation(interaction: discord.Interaction):
         logging.exception("Error in /resetrotation")
         await interaction.followup.send("❌ Failed to reset rotation. Check logs.", ephemeral=True)
 
+@resetrotation.error
+async def resetrotation_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.CheckFailure):
+        await interaction.response.send_message("🚫 Directors only.", ephemeral=True)
+
 # --- (Optional) prune old global commands once, then remove this
-@app_commands.guilds(GUILD_OBJ) if GUILD_OBJ else (lambda f: f)
+if GUILD_OBJ:
+    @app_commands.guilds(GUILD_OBJ)
 @bot.tree.command(name="prune_globals", description="Director only: remove any globally-registered commands")
-@require_director()
+@app_commands.check(director_check)
 async def prune_globals(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     try:
@@ -418,6 +436,11 @@ async def prune_globals(interaction: discord.Interaction):
     except Exception:
         logging.exception("Failed to prune global commands")
         await interaction.followup.send("⚠️ Failed to prune global commands.", ephemeral=True)
+
+@prune_globals.error
+async def prune_globals_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.CheckFailure):
+        await interaction.response.send_message("🚫 Directors only.", ephemeral=True)
 
 # ---------------------------
 # Run
