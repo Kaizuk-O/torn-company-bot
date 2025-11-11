@@ -21,61 +21,6 @@ intents.guilds = True
 intents.members = True   # 👈 REQUIRED for on_member_join
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-import re
-
-def norm(name: str) -> str:
-    # normalize for matching: trim, collapse whitespace, casefold
-    return re.sub(r"\s+", " ", (name or "")).strip().casefold()
-
-def all_trained(data: dict) -> bool:
-    emps = data.get("employees", [])
-    trained = data.get("trained", {})
-    return len(emps) > 0 and all(trained.get(e, "N") == "Y" for e in emps)
-
-def reset_rotation(data: dict):
-    trained = data.setdefault("trained", {})
-    for e in data.get("employees", []):
-        trained[e] = "N"
-    data["rotation_cycle"] = data.get("rotation_cycle", 0) + 1
-    save_data(data)
-
-def sync_torn_data():
-    data = load_data()
-    company = get_company_data()  # your existing API fetch
-    if not company or "company_employees" not in company:
-        print("Error: invalid Torn data.")
-        return False
-
-    # Build ordered employee list (oldest first, then name)
-    api_emps = [emp["name"] for _, emp in sorted(
-        company["company_employees"].items(),
-        key=lambda kv: (-int(kv[1].get("days_in_company", 0)), kv[1].get("name", "").lower())
-    )]
-
-    # --- MERGE trained flags safely ---
-    trained = data.setdefault("trained", {})
-
-    # drop flags for employees who left
-    for k in list(trained.keys()):
-        if k not in api_emps:
-            trained.pop(k, None)
-
-    # initialize new hires
-    for e in api_emps:
-        trained.setdefault(e, "N")
-
-    # save the canonical employee order
-    data["employees"] = api_emps
-    save_data(data)
-
-    # If everyone is trained (even after reordering), reset cleanly
-    if all_trained(data):
-        reset_rotation(data)
-
-    trains = company["company_detailed"].get("trains_available", 0)
-    print(f"[sync] Employees: {len(api_emps)}, trains={trains}")
-    return True
-
 
 DATA_FILE = "rotation.json"
 tz = pytz.timezone(TIMEZONE)
@@ -112,6 +57,7 @@ def save_data(data):
     with open(DATA_FILE, "w") as f:
         json.dump(data, f, indent=4)
 
+# --- Torn Sync Job ---
 # --- Torn Sync Job ---
 def sync_torn_data():
     data = load_data()
@@ -278,62 +224,40 @@ async def status(interaction: discord.Interaction):
         await interaction.followup.send("⚠️ Failed to retrieve status.", ephemeral=True)
 
 
-@bot.tree.command(name="train", description="Mark an employee as trained for this rotation")
-async def train_cmd(interaction: discord.Interaction, name: str):
-    if not is_director(interaction):  # keep your existing role check
-        await interaction.response.send_message("🚫 Directors only.", ephemeral=True)
+@bot.tree.command(name="train", description="(Owner only) Mark an employee as trained")
+async def train(interaction: discord.Interaction, name: str):
+    # Restrict to owner ID only
+    if interaction.user.id != 209088844186910722:
+        await interaction.response.send_message("🚫 You don’t have permission to do that.", ephemeral=True)
         return
-
-    await interaction.response.defer(ephemeral=True)
 
     data = load_data()
-    employees = data.get("employees", [])
-    trained = data.setdefault("trained", {})
-
-    # exact match on normalized names
-    target = None
-    nkey = norm(name)
-    for e in employees:
-        if norm(e) == nkey:
-            target = e
-            break
-
-    if not target:
-        await interaction.followup.send(f"❌ Employee '{name}' not found in current rotation.", ephemeral=True)
+    if name not in data["trained"]:
+        await interaction.response.send_message("Employee not found in rotation.")
         return
 
-    trained[target] = "Y"
+    data["trained"][name] = "Y"
     save_data(data)
+    await interaction.response.send_message(f"✅ {name} marked as trained.")
 
-    if all_trained(data):
-        reset_rotation(data)
-        await interaction.followup.send(
-            f"✅ Marked **{target}** as trained.\n🔁 All employees trained — rotation **reset** (cycle #{data.get('rotation_cycle')}).",
-            ephemeral=False
-        )
-    else:
-        remaining = [e for e in employees if data["trained"].get(e) != "Y"]
-        nxt = remaining[0] if remaining else "—"
-        await interaction.followup.send(
-            f"✅ Marked **{target}** as trained.\n🔜 Next up: **{nxt}**",
-            ephemeral=False
-        )
+    # Reset if all trained
+    if all(v == "Y" for v in data["trained"].values()):
+        for n in data["trained"]:
+            data["trained"][n] = "N"
+        save_data(data)
+        await interaction.followup.send("♻️ All employees trained! Rotation reset.")
 
 
-
-@bot.tree.command(name="forceupdate", description="Force a Torn company sync now")
+@bot.tree.command(name="forceupdate", description="(Owner only) Manually sync company data from Torn API now")
 async def forceupdate(interaction: discord.Interaction):
-    if not is_director(interaction):
-        await interaction.response.send_message("🚫 Directors only.", ephemeral=True)
+    # Restrict to owner ID only
+    if interaction.user.id != 209088844186910722:
+        await interaction.response.send_message("🚫 You don’t have permission to do that.", ephemeral=True)
         return
 
-    await interaction.response.defer(ephemeral=True)
-    ok = sync_torn_data()
-    if ok:
-        await interaction.followup.send("✅ Torn company data synced successfully.")
-    else:
-        await interaction.followup.send("❌ Failed to sync (check Torn API / logs).")
-
+    await interaction.response.defer(thinking=True)
+    sync_torn_data()
+    await interaction.followup.send("🔄 Forced Torn data update complete.")
 
 @bot.tree.command(name="verify", description="Verify your Torn account and receive the Employee role if eligible")
 async def verify(interaction: discord.Interaction):
@@ -396,7 +320,5 @@ async def on_ready():
 if __name__ == "__main__":
     import asyncio
     asyncio.run(bot.start(TOKEN))
-
-
 
 
