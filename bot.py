@@ -3,7 +3,7 @@ from discord.ext import commands, tasks
 import requests
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
@@ -147,6 +147,40 @@ async def rotation(interaction: discord.Interaction):
         msg += f"{i}. {name} — {status}\n"
     await interaction.response.send_message(msg)
 
+@bot.tree.command(name="resetrotation", description="Director only: manually reset the entire training rotation (failsafe)")
+async def resetrotation(interaction: discord.Interaction):
+    # Restrict to you/directors only
+    if not is_director(interaction):  # keep your existing role check helper
+        await interaction.response.send_message("🚫 Directors only.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        data = load_data()
+        employees = data.get("employees", [])
+        if not employees:
+            await interaction.followup.send("⚠️ No employees loaded. Try `/forceupdate` first.", ephemeral=True)
+            return
+
+        # Reset all flags
+        trained = data.setdefault("trained", {})
+        for e in employees:
+            trained[e] = "N"
+
+        # Optional: track how many times we’ve reset
+        data["rotation_cycle"] = data.get("rotation_cycle", 0) + 1
+
+        save_data(data)
+        await interaction.followup.send(
+            f"🔁 Rotation has been **manually reset** (cycle #{data['rotation_cycle']}).",
+            ephemeral=False
+        )
+    except Exception as e:
+        print(f"Error in /resetrotation: {e}")
+        await interaction.followup.send("❌ Failed to reset rotation. Check logs.", ephemeral=True)
+
+
 @bot.tree.command(name="remaining", description="Show employees who still need training this rotation")
 async def remaining(interaction: discord.Interaction):
     if not has_company_role(interaction):
@@ -240,12 +274,18 @@ async def train(interaction: discord.Interaction, name: str):
     save_data(data)
     await interaction.response.send_message(f"✅ {name} marked as trained.")
 
-    # Reset if all trained
-    if all(v == "Y" for v in data["trained"].values()):
-        for n in data["trained"]:
-            data["trained"][n] = "N"
-        save_data(data)
-        await interaction.followup.send("♻️ All employees trained! Rotation reset.")
+# Auto-reset when everyone is trained
+if all(trained.get(e, "N") == "Y" for e in employees):
+    for e in employees:
+        trained[e] = "N"
+    data["rotation_cycle"] = data.get("rotation_cycle", 0) + 1
+    save_data(data)
+    await interaction.followup.send(
+        f"✅ Marked **{target}** as trained.\n🔁 All employees trained — rotation **reset** (cycle #{data['rotation_cycle']}).",
+        ephemeral=False
+    )
+    return
+
 
 
 @bot.tree.command(name="forceupdate", description="(Owner only) Manually sync company data from Torn API now")
@@ -320,5 +360,6 @@ async def on_ready():
 if __name__ == "__main__":
     import asyncio
     asyncio.run(bot.start(TOKEN))
+
 
 
