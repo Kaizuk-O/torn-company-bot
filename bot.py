@@ -274,17 +274,17 @@ async def train(interaction: discord.Interaction, name: str):
     save_data(data)
     await interaction.response.send_message(f"✅ {name} marked as trained.")
 
-# Auto-reset when everyone is trained
-if all(trained.get(e, "N") == "Y" for e in employees):
-    for e in employees:
-        trained[e] = "N"
-    data["rotation_cycle"] = data.get("rotation_cycle", 0) + 1
-    save_data(data)
-    await interaction.followup.send(
-        f"✅ Marked **{target}** as trained.\n🔁 All employees trained — rotation **reset** (cycle #{data['rotation_cycle']}).",
-        ephemeral=False
-    )
-    return
+    # Auto-reset when everyone is trained
+    if all(trained.get(e, "N") == "Y" for e in employees):
+        for e in employees:
+            trained[e] = "N"
+        data["rotation_cycle"] = data.get("rotation_cycle", 0) + 1
+        save_data(data)
+        await interaction.followup.send(
+            f"✅ Marked **{target}** as trained.\n🔁 All employees trained — rotation **reset** (cycle #{data['rotation_cycle']}).",
+            ephemeral=False
+        )
+        return
 
 
 
@@ -360,6 +360,7 @@ async def on_ready():
 if __name__ == "__main__":
     import asyncio
     asyncio.run(bot.start(TOKEN))
+
 
 
 
