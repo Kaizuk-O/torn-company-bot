@@ -232,7 +232,7 @@ async def on_member_join(member: discord.Member):
 
 # --- /forceupdate (director only)
 if GUILD_OBJ:
-    @app_commands.guilds(GUILD_OBJ)
+@app_commands.guilds(GUILD_OBJ)
 @bot.tree.command(name="forceupdate", description="Director only: force a Torn company sync now")
 @app_commands.check(director_check)
 async def forceupdate(interaction: discord.Interaction):
@@ -250,7 +250,7 @@ async def forceupdate_error(interaction: discord.Interaction, error: app_command
 
 # --- /status (employee or director)
 if GUILD_OBJ:
-    @app_commands.guilds(GUILD_OBJ)
+@app_commands.guilds(GUILD_OBJ)
 @bot.tree.command(name="status", description="Show company sync and training status summary")
 @app_commands.check(company_role_check)
 async def status(interaction: discord.Interaction):
@@ -298,7 +298,7 @@ async def status_error(interaction: discord.Interaction, error: app_commands.App
 
 # --- /rotation (employee or director)
 if GUILD_OBJ:
-    @app_commands.guilds(GUILD_OBJ)
+@app_commands.guilds(GUILD_OBJ)
 @bot.tree.command(name="rotation", description="Show current rotation and trained status")
 @app_commands.check(company_role_check)
 async def rotation(interaction: discord.Interaction):
@@ -325,7 +325,7 @@ async def rotation_error(interaction: discord.Interaction, error: app_commands.A
 
 # --- /remaining (employee or director)
 if GUILD_OBJ:
-    @app_commands.guilds(GUILD_OBJ)
+@app_commands.guilds(GUILD_OBJ)
 @bot.tree.command(name="remaining", description="Show employees who still need training this rotation")
 @app_commands.check(company_role_check)
 async def remaining(interaction: discord.Interaction):
@@ -354,7 +354,7 @@ async def remaining_error(interaction: discord.Interaction, error: app_commands.
 
 # --- /train (director only)
 if GUILD_OBJ:
-    @app_commands.guilds(GUILD_OBJ)
+@app_commands.guilds(GUILD_OBJ)
 @bot.tree.command(name="train", description="Mark an employee as trained for this rotation")
 @app_commands.check(director_check)
 async def train_cmd(interaction: discord.Interaction, name: str):
@@ -397,7 +397,7 @@ async def train_error(interaction: discord.Interaction, error: app_commands.AppC
 
 # --- /resetrotation (director only)
 if GUILD_OBJ:
-    @app_commands.guilds(GUILD_OBJ)
+@app_commands.guilds(GUILD_OBJ)
 @bot.tree.command(name="resetrotation", description="Director only: manually reset the entire training rotation (failsafe)")
 @app_commands.check(director_check)
 async def resetrotation(interaction: discord.Interaction):
@@ -423,7 +423,7 @@ async def resetrotation_error(interaction: discord.Interaction, error: app_comma
 
 # --- (Optional) prune old global commands once, then remove this
 if GUILD_OBJ:
-    @app_commands.guilds(GUILD_OBJ)
+@app_commands.guilds(GUILD_OBJ)
 @bot.tree.command(name="prune_globals", description="Director only: remove any globally-registered commands")
 @app_commands.check(director_check)
 async def prune_globals(interaction: discord.Interaction):
@@ -449,3 +449,4 @@ if __name__ == "__main__":
     if not DISCORD_TOKEN:
         raise SystemExit("Missing DISCORD_TOKEN in .env")
     bot.run(DISCORD_TOKEN)
+
