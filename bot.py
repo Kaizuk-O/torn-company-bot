@@ -111,6 +111,62 @@ def company_role_check(interaction: discord.Interaction) -> bool:
     roles = [r.name.lower() for r in getattr(interaction.user, "roles", [])]
     return ("employee" in roles) or ("director" in roles)
 
+async def verify_employee(member: discord.Member) -> str:
+    """Check member nickname against Torn employees and assign Employee role if eligible."""
+    guild = member.guild
+
+    # Find Employee role (case-insensitive)
+    employee_role = discord.utils.find(lambda r: r.name.lower() == "employee", guild.roles)
+    if not employee_role:
+        return "⚠️ I can't find an **Employee** role in this server. Ask the director to create one."
+
+    data = load_data()
+    employees = data.get("employees", [])
+    if not employees:
+        return "⚠️ I don't have any company employees loaded yet. Ask the director to run `/forceupdate` first."
+
+    # Use nickname if set, otherwise username
+    nickname = member.nick or member.name
+
+    # Expect format like: Harry [1925807] → base name "Harry"
+    base_name = re.split(r"\[|\(", nickname)[0].strip()
+    if not base_name:
+        return (
+            "⚠️ I couldn't parse your Torn name from your Discord nickname.\n"
+            "Set your nickname to something like `Name [1234567]` and try `/verify` again."
+        )
+
+    # Try to match case-insensitive against employee list
+    match = None
+    for e in employees:
+        if norm(e) == norm(base_name):
+            match = e
+            break
+
+    if not match:
+        return (
+            f"❌ I couldn't find a company employee matching `{base_name}`.\n"
+            "Make sure your Discord nickname matches your Torn name (before the ID)."
+        )
+
+    # Already has the role
+    if employee_role in member.roles:
+        return f"✅ You're already verified as **{match}** and have the Employee role."
+
+    # Try to add the role
+    try:
+        await member.add_roles(employee_role, reason="Verified via /verify command")
+        return f"✅ Verified as **{match}** and given the **Employee** role."
+    except discord.Forbidden:
+        return (
+            "⚠️ I don't have permission to assign roles.\n"
+            "Ask the director to move my bot role **above** `Employee` and give me `Manage Roles`."
+        )
+    except Exception:
+        logging.exception("Error assigning Employee role")
+        return "⚠️ Something went wrong assigning your role. Ask the director to check the bot logs."
+
+
 # ---------------------------
 # Torn API
 # ---------------------------
@@ -300,6 +356,20 @@ async def status(interaction: discord.Interaction):
         logging.exception("Error in /status")
         await interaction.followup.send("⚠️ Failed to retrieve status.", ephemeral=True)
 
+@guild_only()
+@bot.tree.command(
+    name="verify",
+    description="Verify your Torn account and receive the Employee role if eligible"
+)
+async def verify(interaction: discord.Interaction):
+    member = interaction.user
+
+    # ephemeral so only they see the result
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    result_msg = await verify_employee(member)
+    await interaction.followup.send(result_msg, ephemeral=True)
+
+
 @status.error
 async def status_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.CheckFailure):
@@ -318,7 +388,7 @@ async def rotation(interaction: discord.Interaction):
         if not emps:
             await interaction.followup.send("⚠️ No employees loaded. Try `/forceupdate` first.", ephemeral=True)
             return
-        lines = [f"{e} — {'✅' if trained.get(e) == "Y" else '❌'}" for e in emps]
+        lines = [f"{e} — {'✅' if trained.get(e) == 'Y' else '❌'}" for e in emps]
         if all_trained(data):
             lines.append("\n🔁 All trained — rotation will reset automatically on the next mark.")
         await interaction.followup.send("\n".join(lines))
@@ -452,3 +522,4 @@ if __name__ == "__main__":
     if not DISCORD_TOKEN:
         raise SystemExit("Missing DISCORD_TOKEN in .env")
     bot.run(DISCORD_TOKEN)
+
