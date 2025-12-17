@@ -25,8 +25,8 @@ load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 TORN_API_KEY = os.getenv("TORN_API_KEY", "").strip()
-DIRECTOR_ID = int(os.getenv("DISCORD_USER_ID", "0"))         # your user ID
-GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))           # your server ID
+DIRECTOR_ID = int(os.getenv("DISCORD_USER_ID", "0"))         
+GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))           
 TIMEZONE = os.getenv("TIMEZONE", "Europe/London")
 WELCOME_CHANNEL_NAME = os.getenv("WELCOME_CHANNEL", "general")
 DATA_FILE = os.getenv("DATA_FILE", "data.json")
@@ -36,15 +36,10 @@ SYNC_HOUR = 19
 SYNC_MINUTE = 30
 tz = pytz.timezone(TIMEZONE)
 
-# Guild object for scoping slash commands (prevents duplicates)
 GUILD_OBJ = discord.Object(id=GUILD_ID) if GUILD_ID else None
 _COMMANDS_SYNCED = False
 
-# ---------------------------
-# Helper decorator to avoid conditional @ lines
-# ---------------------------
 def guild_only():
-    """Decorator that applies app_commands.guilds(GUILD_OBJ) if set, else identity."""
     if GUILD_OBJ:
         return app_commands.guilds(GUILD_OBJ)
     def identity(fn):
@@ -56,8 +51,8 @@ def guild_only():
 # ---------------------------
 intents = discord.Intents.default()
 intents.guilds = True
-intents.members = True           # for on_member_join
-intents.message_content = True   # optional
+intents.members = True           
+intents.message_content = True   
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ---------------------------
@@ -81,7 +76,7 @@ def save_data(d: dict):
         logging.exception("Failed to save data.json")
 
 # ---------------------------
-# Rotation helpers
+# Rotation helpers & Checks
 # ---------------------------
 def norm(name: str) -> str:
     return re.sub(r"\s+", " ", (name or "")).strip().casefold()
@@ -112,31 +107,19 @@ def company_role_check(interaction: discord.Interaction) -> bool:
     return ("employee" in roles) or ("director" in roles)
 
 async def verify_employee(member: discord.Member) -> str:
-    """Check member nickname against Torn employees and assign Employee role if eligible."""
     guild = member.guild
-
-    # Find Employee role (case-insensitive)
     employee_role = discord.utils.find(lambda r: r.name.lower() == "employee", guild.roles)
     if not employee_role:
-        return "⚠️ I can't find an **Employee** role in this server. Ask the director to create one."
+        return "⚠️ I can't find an **Employee** role in this server."
 
     data = load_data()
     employees = data.get("employees", [])
     if not employees:
-        return "⚠️ I don't have any company employees loaded yet. Ask the director to run `/forceupdate` first."
+        return "⚠️ I don't have any company employees loaded yet."
 
-    # Use nickname if set, otherwise username
     nickname = member.nick or member.name
-
-    # Expect format like: Harry [1925807] → base name "Harry"
     base_name = re.split(r"\[|\(", nickname)[0].strip()
-    if not base_name:
-        return (
-            "⚠️ I couldn't parse your Torn name from your Discord nickname.\n"
-            "Set your nickname to something like `Name [1234567]` and try `/verify` again."
-        )
-
-    # Try to match case-insensitive against employee list
+    
     match = None
     for e in employees:
         if norm(e) == norm(base_name):
@@ -144,28 +127,19 @@ async def verify_employee(member: discord.Member) -> str:
             break
 
     if not match:
-        return (
-            f"❌ I couldn't find a company employee matching `{base_name}`.\n"
-            "Make sure your Discord nickname matches your Torn name (before the ID)."
-        )
+        return f"❌ I couldn't find a company employee matching `{base_name}`."
 
-    # Already has the role
     if employee_role in member.roles:
         return f"✅ You're already verified as **{match}** and have the Employee role."
 
-    # Try to add the role
     try:
         await member.add_roles(employee_role, reason="Verified via /verify command")
         return f"✅ Verified as **{match}** and given the **Employee** role."
     except discord.Forbidden:
-        return (
-            "⚠️ I don't have permission to assign roles.\n"
-            "Ask the director to move my bot role **above** `Employee` and give me `Manage Roles`."
-        )
+        return "⚠️ I don't have permission to assign roles."
     except Exception:
         logging.exception("Error assigning Employee role")
-        return "⚠️ Something went wrong assigning your role. Ask the director to check the bot logs."
-
+        return "⚠️ Something went wrong assigning your role."
 
 # ---------------------------
 # Torn API
@@ -188,30 +162,20 @@ def get_company_data() -> dict | None:
         return None
 
 def sync_torn_data() -> bool:
-    """
-    Fetch Torn company, merge rotation safely (preserve 'trained'),
-    drop leavers, init new hires, auto-reset if everyone is trained.
-    """
     base = load_data()
     company = get_company_data()
     if not company or "company_employees" not in company:
-        logging.error("Error: invalid Torn data.")
         return False
 
-    # Oldest first, then name
     api_emps = [emp["name"] for _, emp in sorted(
         company["company_employees"].items(),
         key=lambda kv: (-int(kv[1].get("days_in_company", 0)), kv[1].get("name", "").lower())
     )]
 
     trained = base.setdefault("trained", {})
-
-    # Drop leavers
     for k in list(trained.keys()):
         if k not in api_emps:
             trained.pop(k, None)
-
-    # Init new hires
     for e in api_emps:
         trained.setdefault(e, "N")
 
@@ -242,12 +206,11 @@ async def dm_director(message: str):
 
 def scheduled_sync():
     ok = sync_torn_data()
-    if not ok:
-        return
+    if not ok: return
     data = load_data()
     trains = int(data.get("company_snapshot", {}).get("company_detailed", {}).get("trains_available", 0) or 0)
     if trains >= 10:
-        bot.loop.create_task(dm_director(f"🔔 Trains available: **{trains}** — time to train two employees (5× each)."))
+        bot.loop.create_task(dm_director(f"🔔 Trains available: **{trains}**."))
 
 # ---------------------------
 # Events
@@ -255,29 +218,36 @@ def scheduled_sync():
 @bot.event
 async def on_ready():
     global _COMMANDS_SYNCED
+    
+    # --- LOAD TRADING COG ---
     try:
-        # Sync ONLY to the guild once; do NOT copy globals (prevents duplicates)
+        if not hasattr(bot, 'cogs_loaded'):
+            await bot.load_extension('cogs.trading_cog')
+            bot.cogs_loaded = True
+            logging.info("✅ Trading Cog Loaded Successfully")
+    except Exception as e:
+        logging.error(f"❌ Failed to load Trading Cog: {e}")
+    # ------------------------
+
+    try:
         if not _COMMANDS_SYNCED:
             if GUILD_OBJ:
                 await bot.tree.sync(guild=GUILD_OBJ)
                 logging.info(f"🔁 Synced slash commands to guild {GUILD_ID}.")
             else:
                 await bot.tree.sync()
-                logging.info("🔁 Synced slash commands globally (no GUILD_ID set).")
+                logging.info("🔁 Synced slash commands globally.")
             _COMMANDS_SYNCED = True
-        else:
-            logging.info("🔁 Commands already synced; skipping re-sync.")
     except Exception:
         logging.exception("Failed to sync commands")
 
     logging.info(f"✅ Logged in as {bot.user} ({bot.user.id})")
 
-    # Start scheduler once
     try:
         if not scheduler.running:
             scheduler.add_job(scheduled_sync, "cron", hour=SYNC_HOUR, minute=SYNC_MINUTE)
             scheduler.start()
-            logging.info("📅 Scheduler started (daily 19:30 UK).")
+            logging.info("📅 Scheduler started.")
     except Exception:
         logging.exception("Failed to start scheduler")
 
@@ -286,37 +256,30 @@ async def on_member_join(member: discord.Member):
     channel = discord.utils.get(member.guild.text_channels, name=WELCOME_CHANNEL_NAME)
     if channel:
         try:
-            await channel.send(
-                f"👋 Welcome to **{member.guild.name}**, {member.mention}!\n"
-                "Please use the `/verify` command to get your employee role."
-            )
+            await channel.send(f"👋 Welcome to **{member.guild.name}**, {member.mention}! Use `/verify`.")
         except Exception:
             logging.exception("Failed to send welcome message")
 
 # ---------------------------
-# Slash Commands (guild-scoped to avoid duplicates)
+# Slash Commands (Existing)
 # ---------------------------
-
-# /forceupdate (director only)
 @guild_only()
-@bot.tree.command(name="forceupdate", description="Director only: force a Torn company sync now")
+@bot.tree.command(name="forceupdate", description="Director only: force sync")
 @app_commands.check(director_check)
 async def forceupdate(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    ok = sync_torn_data()
-    if ok:
-        await interaction.followup.send("✅ Torn company data synced successfully.")
+    if sync_torn_data():
+        await interaction.followup.send("✅ Data synced.")
     else:
-        await interaction.followup.send("❌ Failed to sync (check Torn API / logs).", ephemeral=True)
+        await interaction.followup.send("❌ Sync failed.", ephemeral=True)
 
 @forceupdate.error
 async def forceupdate_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.CheckFailure):
         await interaction.response.send_message("🚫 Directors only.", ephemeral=True)
 
-# /status (employee or director)
 @guild_only()
-@bot.tree.command(name="status", description="Show company sync and training status summary")
+@bot.tree.command(name="status", description="Show company status")
 @app_commands.check(company_role_check)
 async def status(interaction: discord.Interaction):
     await interaction.response.defer()
@@ -326,192 +289,55 @@ async def status(interaction: discord.Interaction):
         trained = data.get("trained", {})
         trained_count = sum(1 for v in trained.values() if v == "Y")
         total = len(emps)
-
-        snap = data.get("company_snapshot", {})
-        trains = snap.get("company_detailed", {}).get("trains_available", "N/A")
-        last_sync = data.get("last_sync", "N/A")
-
-        now = datetime.now(tz)
-        next_sync_time = now.replace(hour=SYNC_HOUR, minute=SYNC_MINUTE, second=0, microsecond=0)
-        if next_sync_time < now:
-            next_sync_time += timedelta(days=1)
-        delta = next_sync_time - now
-        hours, rem = divmod(int(delta.total_seconds()), 3600)
-        minutes = rem // 60
-
+        trains = data.get("company_snapshot", {}).get("company_detailed", {}).get("trains_available", "N/A")
+        
         embed = discord.Embed(
-            title="📊 Company Status Overview",
-            description="Summary for **Violent RE:Solutions**",
+            title="📊 Company Status",
             color=discord.Color.blurple(),
             timestamp=datetime.now()
         )
-        embed.add_field(name="🏢 Company", value="Violent RE:Solutions", inline=True)
-        embed.add_field(name="💪 Trains Available", value=str(trains), inline=True)
-        embed.add_field(name="📅 Last Sync", value=f"{last_sync} (UK)", inline=False)
-        embed.add_field(name="🔄 Next Sync", value=f"In {hours}h {minutes}m (19:30 UK)", inline=False)
-        embed.add_field(name="🎯 Rotation Progress", value=f"{trained_count}/{total} trained", inline=True)
-        embed.set_footer(text="Updated via Torn API")
+        embed.add_field(name="Trains", value=str(trains))
+        embed.add_field(name="Rotation", value=f"{trained_count}/{total} trained")
         await interaction.followup.send(embed=embed)
     except Exception:
-        logging.exception("Error in /status")
         await interaction.followup.send("⚠️ Failed to retrieve status.", ephemeral=True)
-
-@guild_only()
-@bot.tree.command(
-    name="verify",
-    description="Verify your Torn account and receive the Employee role if eligible"
-)
-async def verify(interaction: discord.Interaction):
-    member = interaction.user
-
-    # ephemeral so only they see the result
-    await interaction.response.defer(thinking=True, ephemeral=True)
-    result_msg = await verify_employee(member)
-    await interaction.followup.send(result_msg, ephemeral=True)
-
 
 @status.error
 async def status_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.CheckFailure):
-        await interaction.response.send_message("🚫 You don’t have permission.", ephemeral=True)
+        await interaction.response.send_message("🚫 No permission.", ephemeral=True)
 
-# /rotation (employee or director)
 @guild_only()
-@bot.tree.command(name="rotation", description="Show current rotation and trained status")
-@app_commands.check(company_role_check)
-async def rotation(interaction: discord.Interaction):
-    await interaction.response.defer()
-    try:
-        data = load_data()
-        emps = data.get("employees", [])
-        trained = data.get("trained", {})
-        if not emps:
-            await interaction.followup.send("⚠️ No employees loaded. Try `/forceupdate` first.", ephemeral=True)
-            return
-        lines = [f"{e} — {'✅' if trained.get(e) == 'Y' else '❌'}" for e in emps]
-        if all_trained(data):
-            lines.append("\n🔁 All trained — rotation will reset automatically on the next mark.")
-        await interaction.followup.send("\n".join(lines))
-    except Exception:
-        logging.exception("Error in /rotation")
-        await interaction.followup.send("⚠️ Error processing /rotation.", ephemeral=True)
+@bot.tree.command(name="verify", description="Verify Torn account")
+async def verify(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    msg = await verify_employee(interaction.user)
+    await interaction.followup.send(msg, ephemeral=True)
 
-@rotation.error
-async def rotation_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.CheckFailure):
-        await interaction.response.send_message("🚫 You don’t have permission.", ephemeral=True)
-
-# /remaining (employee or director)
 @guild_only()
-@bot.tree.command(name="remaining", description="Show employees who still need training this rotation")
-@app_commands.check(company_role_check)
-async def remaining(interaction: discord.Interaction):
-    await interaction.response.defer()
-    try:
-        data = load_data()
-        emps = data.get("employees", [])
-        trained = data.get("trained", {})
-        if not emps:
-            await interaction.followup.send("⚠️ No employee data available yet. Try `/forceupdate`.", ephemeral=True)
-            return
-        remaining_list = [e for e in emps if trained.get(e, "N") != "Y"]
-        if remaining_list:
-            msg = "**Employees left to train:**\n" + "\n".join([f"❌ {name}" for name in remaining_list])
-        else:
-            msg = "✅ All employees are trained this rotation!"
-        await interaction.followup.send(msg)
-    except Exception:
-        logging.exception("Error in /remaining")
-        await interaction.followup.send("⚠️ Error processing /remaining.", ephemeral=True)
-
-@remaining.error
-async def remaining_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.CheckFailure):
-        await interaction.response.send_message("🚫 You don’t have permission.", ephemeral=True)
-
-# /train (director only)
-@guild_only()
-@bot.tree.command(name="train", description="Mark an employee as trained for this rotation")
+@bot.tree.command(name="train", description="Mark employee trained")
 @app_commands.check(director_check)
 async def train_cmd(interaction: discord.Interaction, name: str):
-    await interaction.response.defer()  # public so the channel sees it
-
+    await interaction.response.defer()
     data = load_data()
     employees = data.get("employees", [])
     trained = data.setdefault("trained", {})
-
-    target = None
-    nkey = norm(name)
-    for e in employees:
-        if norm(e) == nkey:
-            target = e
-            break
-
+    
+    target = next((e for e in employees if norm(e) == norm(name)), None)
     if not target:
-        await interaction.followup.send(f"❌ Employee '{name}' not found in current rotation.", ephemeral=True)
+        await interaction.followup.send(f"❌ Employee '{name}' not found.", ephemeral=True)
         return
 
     trained[target] = "Y"
     save_data(data)
-
-    # Auto-reset when everyone is trained
     if all_trained(data):
         reset_rotation(data)
-        await interaction.followup.send(
-            f"✅ Marked **{target}** as trained.\n🔁 All employees trained — rotation **reset** (cycle #{data['rotation_cycle']})."
-        )
-        return
-
-    remaining_list = [e for e in employees if data["trained"].get(e) != "Y"]
-    nxt = remaining_list[0] if remaining_list else "—"
-    await interaction.followup.send(f"✅ Marked **{target}** as trained.\n🔜 Next up: **{nxt}**")
+        await interaction.followup.send(f"✅ Marked **{target}**. All trained! Rotation reset.")
+    else:
+        await interaction.followup.send(f"✅ Marked **{target}** as trained.")
 
 @train_cmd.error
 async def train_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.CheckFailure):
-        await interaction.response.send_message("🚫 Directors only.", ephemeral=True)
-
-# /resetrotation (director only)
-@guild_only()
-@bot.tree.command(name="resetrotation", description="Director only: manually reset the entire training rotation (failsafe)")
-@app_commands.check(director_check)
-async def resetrotation(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    try:
-        data = load_data()
-        if not data.get("employees"):
-            await interaction.followup.send("⚠️ No employees loaded. Try `/forceupdate` first.", ephemeral=True)
-            return
-        reset_rotation(data)
-        await interaction.followup.send(
-            f"🔁 Rotation has been **manually reset** (cycle #{data['rotation_cycle']}).",
-            ephemeral=False
-        )
-    except Exception:
-        logging.exception("Error in /resetrotation")
-        await interaction.followup.send("❌ Failed to reset rotation. Check logs.", ephemeral=True)
-
-@resetrotation.error
-async def resetrotation_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.CheckFailure):
-        await interaction.response.send_message("🚫 Directors only.", ephemeral=True)
-
-# Optional: prune old global commands once, then remove this command
-@guild_only()
-@bot.tree.command(name="prune_globals", description="Director only: remove any globally-registered commands")
-@app_commands.check(director_check)
-async def prune_globals(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    try:
-        bot.tree.clear_commands(guild=None)  # clear global defs locally
-        await bot.tree.sync()                # push empty global set
-        await interaction.followup.send("🧹 Pruned global commands. All commands are now guild-scoped.")
-    except Exception:
-        logging.exception("Failed to prune global commands")
-        await interaction.followup.send("⚠️ Failed to prune global commands.", ephemeral=True)
-
-@prune_globals.error
-async def prune_globals_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.CheckFailure):
         await interaction.response.send_message("🚫 Directors only.", ephemeral=True)
 
@@ -520,6 +346,5 @@ async def prune_globals_error(interaction: discord.Interaction, error: app_comma
 # ---------------------------
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
-        raise SystemExit("Missing DISCORD_TOKEN in .env")
+        raise SystemExit("Missing DISCORD_TOKEN")
     bot.run(DISCORD_TOKEN)
-
