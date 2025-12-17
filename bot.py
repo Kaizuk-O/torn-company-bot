@@ -219,14 +219,6 @@ def scheduled_sync():
 async def on_ready():
     global _COMMANDS_SYNCED
     
-    # --- LOAD TRADING COG ---
-    try:
-        if not hasattr(bot, 'cogs_loaded'):
-            await bot.load_extension('cogs.trading_cog')
-            bot.cogs_loaded = True
-            logging.info("✅ Trading Cog Loaded Successfully")
-    except Exception as e:
-        logging.error(f"❌ Failed to load Trading Cog: {e}")
     # ------------------------
 
     try:
@@ -348,3 +340,4 @@ if __name__ == "__main__":
     if not DISCORD_TOKEN:
         raise SystemExit("Missing DISCORD_TOKEN")
     bot.run(DISCORD_TOKEN)
+
